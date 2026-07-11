@@ -1,0 +1,15 @@
+[Unit]
+Description=PDF Data Extractor - watch-folder service
+After=network.target
+
+[Service]
+Type=simple
+# EDIT these two paths for your machine:
+WorkingDirectory=/opt/pdf_extractor_app
+ExecStart=/usr/bin/python3 /opt/pdf_extractor_app/cli.py --folder /path/to/pdf/folder --watch
+Restart=on-failure
+RestartSec=5
+User=www-data
+
+[Install]
+WantedBy=multi-user.target

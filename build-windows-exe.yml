@@ -1,0 +1,52 @@
+name: Build Windows EXE
+
+# Builds PDF_Extractor.exe and PDF_Extractor_CLI.exe on a Windows runner
+# hosted by GitHub — no Windows PC or Python installation needed on your
+# own computer. Run it from the "Actions" tab of this repository
+# ("Run workflow" button), then download the result from the finished
+# run's "Artifacts" section.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Build PDF_Extractor.exe (desktop app)
+        run: >
+          python -m PyInstaller --noconfirm --onefile --windowed --name PDF_Extractor
+          --collect-all pdfplumber
+          --hidden-import watchdog.observers.polling
+          main.py
+
+      - name: Build PDF_Extractor_CLI.exe (command line / service)
+        run: >
+          python -m PyInstaller --noconfirm --onefile --console --name PDF_Extractor_CLI
+          --collect-all pdfplumber
+          --hidden-import watchdog.observers.polling
+          cli.py
+
+      - name: Upload built executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDF_Extractor-windows
+          path: |
+            dist/PDF_Extractor.exe
+            dist/PDF_Extractor_CLI.exe
+          retention-days: 30
