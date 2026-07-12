@@ -15,15 +15,18 @@ banded rows, autofilter, and a document-wide color theme.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from .extractor import PdfResult
 from .facture_parser import Facture
+
+logger = logging.getLogger("pdf_extractor")
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -88,40 +91,39 @@ def _title_block(ws: Worksheet, title: str, subtitle: str, span_cols: int) -> in
     return 4  # header row starts here
 
 
-def _fill_factures_sheet(ws: Worksheet, factures: list[Facture], source_folder: str) -> Worksheet:
-    total_lignes = sum(len(f.lignes) for f in factures)
+def _facture_to_rows(fac: Facture) -> list[tuple]:
+    """Flatten one Facture into (fournisseur, demandeur, numero, date, description, montant_ht) rows."""
+    if fac.lignes:
+        return [
+            (fac.societe, fac.demandeur, fac.numero, fac.date, ligne.designation, ligne.montant_ht)
+            for ligne in fac.lignes
+        ]
+    # Invoice with no parsed line items: still show one row so it isn't lost
+    return [(fac.societe, fac.demandeur, fac.numero, fac.date, "", fac.sous_total_ht)]
+
+
+def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, invoice_count: int) -> Worksheet:
     header_row = _title_block(
         ws,
         "Factures Proforma",
-        f"Dossier source : {source_folder}  |  Factures : {len(factures)}  |  Lignes : {total_lignes}",
+        f"Dossier source : {source_folder}  |  Factures : {invoice_count}  |  Lignes : {len(rows)}",
         span_cols=6,
     )
     headers = ["Fournisseur", "Demandeur", "Numéro facture", "Date de facture", "Description", "Montant HT"]
     _write_header(ws, headers, row=header_row)
     r = header_row + 1
-    for fac in factures:
-        if fac.lignes:
-            for ligne in fac.lignes:
-                row_vals = [fac.societe, fac.demandeur, fac.numero, fac.date, ligne.designation, ligne.montant_ht]
-                for c_idx, val in enumerate(row_vals, start=1):
-                    cell = ws.cell(row=r, column=c_idx, value=val)
-                    if c_idx == 6 and isinstance(val, (int, float)):
-                        cell.number_format = NUMBER_FORMAT
-                r += 1
-        else:
-            # Invoice with no parsed line items: still show one row so it isn't lost
-            row_vals = [fac.societe, fac.demandeur, fac.numero, fac.date, "", fac.sous_total_ht]
-            for c_idx, val in enumerate(row_vals, start=1):
-                cell = ws.cell(row=r, column=c_idx, value=val)
-                if c_idx == 6 and isinstance(val, (int, float)):
-                    cell.number_format = NUMBER_FORMAT
-            r += 1
+    for row_vals in rows:
+        for c_idx, val in enumerate(row_vals, start=1):
+            cell = ws.cell(row=r, column=c_idx, value=val)
+            if c_idx == 6 and isinstance(val, (int, float)):
+                cell.number_format = NUMBER_FORMAT
+        r += 1
 
     # Grand-total row
-    if factures:
+    if rows:
         total_row = r
         ws.cell(row=total_row, column=1, value="TOTAL").font = TOTAL_FONT
-        total_ht = sum(l.montant_ht for f in factures for l in f.lignes) or sum(f.sous_total_ht or 0 for f in factures)
+        total_ht = sum(row[5] for row in rows if isinstance(row[5], (int, float)))
         cell = ws.cell(row=total_row, column=6, value=total_ht)
         cell.number_format = NUMBER_FORMAT
         cell.font = TOTAL_FONT
@@ -135,6 +137,56 @@ def _fill_factures_sheet(ws: Worksheet, factures: list[Facture], source_folder: 
     return ws
 
 
+def _load_existing_factures_sheet(output_path: Path) -> tuple[list[tuple], set[str]]:
+    """
+    If invoice_summary.xlsx already exists, read back its "Factures" sheet
+    (data rows only — skipping the title block, header, and TOTAL row) so
+    that data already extracted in earlier runs is never lost.
+    Returns (existing_rows, existing_invoice_numbers).
+    """
+    if not output_path.exists():
+        return [], set()
+    try:
+        existing_wb = load_workbook(str(output_path))
+    except Exception:
+        logger.warning("Could not read existing %s (will start fresh).", output_path.name)
+        return [], set()
+    if "Factures" not in existing_wb.sheetnames:
+        return [], set()
+
+    ws = existing_wb["Factures"]
+    header_row = None
+    for r in range(1, ws.max_row + 1):
+        if ws.cell(row=r, column=1).value == "Fournisseur":
+            header_row = r
+            break
+    if header_row is None:
+        return [], set()
+
+    rows: list[tuple] = []
+    numeros: set[str] = set()
+    for r in range(header_row + 1, ws.max_row + 1):
+        first_cell = ws.cell(row=r, column=1).value
+        if first_cell is None or first_cell == "TOTAL":
+            continue
+        row_vals = tuple(ws.cell(row=r, column=c).value for c in range(1, 7))
+        rows.append(row_vals)
+        numero = row_vals[2]
+        if numero:
+            numeros.add(str(numero))
+    return rows, numeros
+
+
+def _safe_save(wb: Workbook, output_path: Path) -> None:
+    try:
+        wb.save(str(output_path))
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Cannot write '{output_path.name}' — it looks like the file is currently open "
+            f"in Excel (or another program). Close it and try again."
+        ) from exc
+
+
 def write_workbook(
     results: list[PdfResult],
     output_path: Path,
@@ -146,20 +198,35 @@ def write_workbook(
     generic_results = [r for r in results if r.file_name not in matched_names]
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Never lose previously extracted invoices: read back what's already in
+    # the file (if any) and only append rows for genuinely new invoice numbers.
+    existing_rows, existing_numeros = _load_existing_factures_sheet(output_path)
+    new_factures = [f for f in factures if not (f.numero and f.numero in existing_numeros)]
+    skipped = len(factures) - len(new_factures)
+    if skipped:
+        logger.info("%d invoice(s) already present in %s — not re-added.", skipped, output_path.name)
+
+    new_rows: list[tuple] = []
+    for fac in new_factures:
+        new_rows.extend(_facture_to_rows(fac))
+
+    all_rows = existing_rows + new_rows
+    invoice_count = len(existing_numeros | {f.numero for f in new_factures if f.numero})
+
     wb = Workbook()
     wb.remove(wb.active)  # we'll add sheets explicitly in the right order
 
     # ------------------------------------------------------- Factures / Lignes
-    if factures:
+    if all_rows:
         ws_fac = wb.create_sheet("Factures")
-        _fill_factures_sheet(ws_fac, factures, source_folder)
+        _fill_factures_sheet(ws_fac, all_rows, source_folder, invoice_count)
         wb.active = 0
 
     # If nothing was auto-recognized, fall back fully to the generic report
     if not generic_results:
-        if not factures:
+        if not all_rows:
             wb.create_sheet("Summary")  # keep a sheet so the workbook isn't empty
-        wb.save(str(output_path))
+        _safe_save(wb, output_path)
         return output_path
 
     # ---------------------------------------------------------------- Summary
@@ -260,5 +327,5 @@ def write_workbook(
             _autosize(ws_t)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(output_path))
+    _safe_save(wb, output_path)
     return output_path

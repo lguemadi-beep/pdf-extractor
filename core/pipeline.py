@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
-from datetime import datetime
 from pathlib import Path
 
 from .excel_writer import write_workbook
@@ -39,10 +38,19 @@ def setup_logging() -> logging.Logger:
     return logger
 
 
-def process_folder(folder: Path, output_dir: Path | None = None, recursive: bool = False) -> Path:
+def process_folder(
+    folder: Path,
+    output_dir: Path | None = None,
+    recursive: bool = False,
+    name_filter: str = "proforma",
+) -> Path:
     """
-    Extract every PDF in `folder`, write a timestamped Excel report into
-    `output_dir` (defaults to `folder`), and return the report's path.
+    Extract every PDF in `folder` whose filename contains `name_filter`
+    (case-insensitive; set to "" to disable), skipping byte-identical
+    duplicate files, and merge the results into `invoice_summary.xlsx` in
+    `output_dir` (defaults to `folder`) — existing rows from previous runs
+    are preserved; only genuinely new invoices are appended. Returns the
+    report's path.
     """
     logger = setup_logging()
     folder = Path(folder)
@@ -51,25 +59,35 @@ def process_folder(folder: Path, output_dir: Path | None = None, recursive: bool
     if not folder.exists() or not folder.is_dir():
         raise NotADirectoryError(f"Folder not found: {folder}")
 
-    logger.info("Starting extraction for folder: %s", folder)
-    results = extract_folder(folder, recursive=recursive)
+    logger.info("Starting extraction for folder: %s (filter: '%s')", folder, name_filter)
+    results = extract_folder(folder, recursive=recursive, name_filter=name_filter)
 
     if not results:
-        logger.warning("No PDF files found in %s", folder)
+        logger.warning("No matching PDF files found in %s", folder)
 
     factures = []
+    seen_numeros: dict[str, str] = {}
     for res in results:
         if res.error:
             continue
         fac = parse_facture(res.full_text, res.file_name)
-        if fac is not None:
-            factures.append(fac)
+        if fac is None:
+            continue
+        if fac.numero and fac.numero in seen_numeros:
+            logger.info(
+                "Skipping duplicate invoice N°%s (already seen in %s): %s",
+                fac.numero, seen_numeros[fac.numero], fac.file_name,
+            )
+            continue
+        if fac.numero:
+            seen_numeros[fac.numero] = fac.file_name
+        factures.append(fac)
+
     if factures:
         logger.info("Recognized %d document(s) as 'Facture Proforma' template", len(factures))
         factures.sort(key=lambda f: (int(f.numero) if f.numero.isdigit() else 0, f.numero))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = output_dir / f"PDF_Extraction_Report_{timestamp}.xlsx"
+    output_path = output_dir / "invoice_summary.xlsx"
     write_workbook(results, output_path, source_folder=str(folder), factures=factures)
 
     ok = sum(1 for r in results if not r.error)

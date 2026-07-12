@@ -16,6 +16,7 @@ the PDF library being used.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -130,12 +131,46 @@ def extract_pdf(file_path: Path) -> PdfResult:
     return result
 
 
-def extract_folder(folder_path: Path, recursive: bool = False) -> list[PdfResult]:
-    """Extract every PDF found directly inside (or recursively under) folder_path."""
+def extract_folder(folder_path: Path, recursive: bool = False, name_filter: str = "proforma") -> list[PdfResult]:
+    """
+    Extract every PDF found directly inside (or recursively under) folder_path.
+
+    - Only files whose *filename* contains `name_filter` (case-insensitive) are
+      processed. Set name_filter="" to disable this filtering.
+    - Duplicate files (identical content, e.g. the same invoice saved twice
+      under different names) are skipped after the first occurrence, based on
+      a content hash — not just the filename.
+    """
     pattern = "**/*.pdf" if recursive else "*.pdf"
-    pdf_files = sorted(folder_path.glob(pattern))
-    results = []
-    for pdf_file in pdf_files:
+    all_pdfs = sorted(folder_path.glob(pattern))
+
+    if name_filter:
+        needle = name_filter.lower()
+        candidates = [p for p in all_pdfs if needle in p.name.lower()]
+        skipped_name = [p for p in all_pdfs if needle not in p.name.lower()]
+        for p in skipped_name:
+            logger.info("Skipping (filename does not contain '%s'): %s", name_filter, p.name)
+    else:
+        candidates = all_pdfs
+
+    results: list[PdfResult] = []
+    seen_hashes: dict[str, Path] = {}
+    for pdf_file in candidates:
+        try:
+            file_hash = hashlib.sha256(pdf_file.read_bytes()).hexdigest()
+        except Exception:
+            file_hash = None
+
+        if file_hash and file_hash in seen_hashes:
+            logger.info(
+                "Skipping duplicate (identical content to %s): %s",
+                seen_hashes[file_hash].name, pdf_file.name,
+            )
+            continue
+        if file_hash:
+            seen_hashes[file_hash] = pdf_file
+
         logger.info("Extracting %s", pdf_file.name)
         results.append(extract_pdf(pdf_file))
+
     return results
