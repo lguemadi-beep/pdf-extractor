@@ -28,10 +28,31 @@ nssm install PdfDataExtractor "%EXE_PATH%" "--folder ""%PDF_FOLDER%"" --watch"
 nssm set PdfDataExtractor AppDirectory "%APP_DIR%"
 nssm set PdfDataExtractor DisplayName "PDF Data Extractor"
 nssm set PdfDataExtractor Description "Watches a folder and extracts PDF data into Excel reports."
+
+REM --- Survive a laptop restart: start automatically with Windows ---
 nssm set PdfDataExtractor Start SERVICE_AUTO_START
 
+REM --- Survive a crash: if the process ever dies, NSSM restarts it ---
+nssm set PdfDataExtractor AppExit Default Restart
+nssm set PdfDataExtractor AppRestartDelay 5000
+nssm set PdfDataExtractor AppThrottle 5000
+
+REM --- Also log service output to files for troubleshooting ---
+nssm set PdfDataExtractor AppStdout "%APP_DIR%\logs\service_stdout.log"
+nssm set PdfDataExtractor AppStderr "%APP_DIR%\logs\service_stderr.log"
+
 echo.
-echo Service installed. Start it with:  nssm start PdfDataExtractor
-echo Stop it with:                      nssm stop PdfDataExtractor
-echo Remove it with:                    nssm remove PdfDataExtractor confirm
+echo Starting the service now...
+nssm start PdfDataExtractor
+
+echo.
+echo ============================================================
+echo   Service installed and started.
+echo   It will now start automatically every time this PC boots,
+echo   even before anyone logs in - no need to open the app.
+echo ============================================================
+echo   Check status:   nssm status PdfDataExtractor
+echo   Stop it:        nssm stop PdfDataExtractor
+echo   Remove it:      nssm remove PdfDataExtractor confirm
+echo ============================================================
 pause
