@@ -80,7 +80,7 @@ def process_folder(
     for res in results:
         if res.error:
             continue
-        fac = parse_facture(res.full_text, res.file_name)
+        fac = parse_facture(res.full_text, res.file_name, tables=res.tables)
         if fac is None:
             continue
         if fac.numero and fac.numero in seen_numeros:
