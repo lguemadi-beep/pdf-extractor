@@ -46,6 +46,7 @@ THIN_BORDER = Border(
 )
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT = Alignment(horizontal="left", vertical="center", wrap_text=False)
+RIGHT = Alignment(horizontal="right", vertical="center", wrap_text=False)
 TOTAL_FONT = Font(bold=True, size=11, name="Calibri")
 TOTAL_FILL = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
 NUMBER_FORMAT = "#,##0.00"
@@ -242,6 +243,7 @@ def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, i
             cell = ws.cell(row=r, column=c_idx, value=val)
             if c_idx == 6 and isinstance(val, (int, float)):
                 cell.number_format = NUMBER_FORMAT
+                cell.alignment = RIGHT
         r += 1
 
     last_data_row = r - 1
@@ -253,6 +255,7 @@ def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, i
         total_ht = sum(row[5] for row in rows if isinstance(row[5], (int, float)))
         cell = ws.cell(row=total_row, column=6, value=total_ht)
         cell.number_format = NUMBER_FORMAT
+        cell.alignment = RIGHT
         cell.font = TOTAL_FONT
         for c in range(1, len(headers) + 1):
             ws.cell(row=total_row, column=c).fill = TOTAL_FILL
@@ -263,6 +266,7 @@ def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, i
     _autosize(
         ws, start_row=header_row,
         column_min_overrides={
+            6: 16,
             7: max(len(o) for o in OWNER_OPTIONS) + 2,
             9: max(len(o) for o in STATUS_OPTIONS) + 2,
         },
@@ -329,94 +333,6 @@ def _load_existing_factures_sheet(output_path: Path) -> tuple[list[tuple], set[s
     return rows, numeros
 
 
-def _group_rows_by_invoice(rows: list[tuple]) -> list[tuple]:
-    """
-    Collapse line-item rows (one row per prestation) into one row per unique
-    invoice number: (fournisseur, demandeur, numero, date, montant_ht_total,
-    owner, affectation, status). Montant HT is summed across that invoice's
-    lines; Owner/Affectation/Status take the first non-empty value found
-    among its lines (manual tracking is usually set once per invoice).
-    Order follows first appearance of each invoice number.
-    """
-    groups: dict[str, dict] = {}
-    order: list[str] = []
-    for row in rows:
-        fournisseur, demandeur, numero, date, _description, montant_ht = row[0], row[1], row[2], row[3], row[4], row[5]
-        owner = row[6] if len(row) > 6 else ""
-        affectation = row[7] if len(row) > 7 else ""
-        status = row[8] if len(row) > 8 else ""
-        key = str(numero) if numero else f"__no_numero_{id(row)}"
-        if key not in groups:
-            groups[key] = {
-                "fournisseur": fournisseur, "demandeur": demandeur, "numero": numero, "date": date,
-                "montant_ht": 0, "owner": owner or "", "affectation": affectation or "", "status": status or "",
-            }
-            order.append(key)
-        g = groups[key]
-        if isinstance(montant_ht, (int, float)):
-            g["montant_ht"] += montant_ht
-        if not g["owner"] and owner:
-            g["owner"] = owner
-        if not g["affectation"] and affectation:
-            g["affectation"] = affectation
-        if not g["status"] and status:
-            g["status"] = status
-
-    return [
-        (g["fournisseur"], g["demandeur"], g["numero"], g["date"], g["montant_ht"], g["owner"], g["affectation"], g["status"])
-        for g in (groups[k] for k in order)
-    ]
-
-
-def _fill_invoice_summary_sheet(ws: Worksheet, invoice_rows: list[tuple], source_folder: str) -> Worksheet:
-    """One row per invoice (no repeated invoice numbers), with the invoice's total Montant HT."""
-    header_row = _title_block(
-        ws,
-        "Résumé par facture (1 ligne / facture)",
-        f"Dossier source : {source_folder}  |  Factures : {len(invoice_rows)}",
-        span_cols=8,
-    )
-    headers = ["Fournisseur", "Demandeur", "Numéro facture", "Date de facture", "Montant HT", "Owner CPM / BA", "Affectation", "Status"]
-    _write_header(ws, headers, row=header_row)
-    _add_dropdown(ws, OWNER_OPTIONS, column_index=6, first_row=header_row + 1, title="Owner CPM / BA")
-    _add_dropdown(ws, STATUS_OPTIONS, column_index=8, first_row=header_row + 1, title="Status")
-    r = header_row + 1
-    for row_vals in invoice_rows:
-        for c_idx, val in enumerate(row_vals, start=1):
-            cell = ws.cell(row=r, column=c_idx, value=val)
-            if c_idx == 5 and isinstance(val, (int, float)):
-                cell.number_format = NUMBER_FORMAT
-        r += 1
-
-    last_data_row = r - 1
-
-    if invoice_rows:
-        total_row = r
-        ws.cell(row=total_row, column=1, value="TOTAL").font = TOTAL_FONT
-        total_ht = sum(row[4] for row in invoice_rows if isinstance(row[4], (int, float)))
-        cell = ws.cell(row=total_row, column=5, value=total_ht)
-        cell.number_format = NUMBER_FORMAT
-        cell.font = TOTAL_FONT
-        for c in range(1, len(headers) + 1):
-            ws.cell(row=total_row, column=c).fill = TOTAL_FILL
-            ws.cell(row=total_row, column=c).border = THIN_BORDER
-        r += 1
-
-    _band_rows(ws, header_row + 1, max(r - 1, header_row + 1), len(headers))
-    _autosize(
-        ws, start_row=header_row,
-        column_min_overrides={
-            6: max(len(o) for o in OWNER_OPTIONS) + 2,
-            8: max(len(o) for o in STATUS_OPTIONS) + 2,
-        },
-    )
-    if last_data_row >= header_row + 1:
-        _protect_extracted_columns(
-            ws, locked_columns=[1, 2, 3, 4, 5], editable_columns=[6, 7, 8],
-            first_row=header_row + 1, last_row=last_data_row,
-        )
-        _make_columns_readonly(ws, columns=[1, 2, 3, 4, 5], first_row=header_row + 1, last_row=last_data_row)
-    return ws
 
 
 def _safe_save(wb: Workbook, output_path: Path) -> None:
@@ -434,8 +350,10 @@ def write_workbook(
     output_path: Path,
     source_folder: str,
     factures: list[Facture] | None = None,
+    cancelled_numeros: set[str] | None = None,
 ) -> Path:
     factures = factures or []
+    cancelled_numeros = cancelled_numeros or set()
     matched_names = {f.file_name for f in factures}
     generic_results = [r for r in results if r.file_name not in matched_names]
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -443,7 +361,21 @@ def write_workbook(
     # Never lose previously extracted invoices: read back what's already in
     # the file (if any) and only append rows for genuinely new invoice numbers.
     existing_rows, existing_numeros = _load_existing_factures_sheet(output_path)
-    new_factures = [f for f in factures if not (f.numero and f.numero in existing_numeros)]
+
+    if cancelled_numeros:
+        removed = sum(1 for row in existing_rows if str(row[2]) in cancelled_numeros)
+        existing_rows = [row for row in existing_rows if str(row[2]) not in cancelled_numeros]
+        existing_numeros -= cancelled_numeros
+        if removed:
+            logger.info(
+                "Removed %d existing row(s) for cancelled invoice(s): %s",
+                removed, ", ".join(sorted(cancelled_numeros)),
+            )
+
+    new_factures = [
+        f for f in factures
+        if not (f.numero and f.numero in existing_numeros) and f.numero not in cancelled_numeros
+    ]
     skipped = len(factures) - len(new_factures)
     if skipped:
         logger.info("%d invoice(s) already present in %s — not re-added.", skipped, output_path.name)
@@ -463,9 +395,6 @@ def write_workbook(
         ws_fac = wb.create_sheet("Factures")
         _fill_factures_sheet(ws_fac, all_rows, source_folder, invoice_count)
         wb.active = 0
-
-        ws_inv = wb.create_sheet("Résumé Factures")
-        _fill_invoice_summary_sheet(ws_inv, _group_rows_by_invoice(all_rows), source_folder)
 
     # If nothing was auto-recognized, fall back fully to the generic report
     if not generic_results:

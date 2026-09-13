@@ -96,6 +96,41 @@ def _clean_designation(raw: str) -> str:
     return cleaned
 
 
+def _mdy_to_dmy(date_str: str) -> str:
+    """
+    The source PDF's date widget uses the US mm/dd/yyyy format (confirmed
+    by its own placeholder text, literally "mm/dd/yyyy", seen in the raw
+    PDF text). Convert to the day/month/year format requested for display.
+    """
+    parts = date_str.split("/")
+    if len(parts) != 3:
+        return date_str
+    mm, dd, yyyy = parts
+    try:
+        mm_i, dd_i = int(mm), int(dd)
+    except ValueError:
+        return date_str
+    return f"{dd_i:02d}/{mm_i:02d}/{yyyy}"
+
+
+def extract_invoice_number_from_filename(file_name: str) -> str | None:
+    """
+    Best-effort extraction of an invoice number from a filename, used for
+    "annulation" (cancellation) files where the number might not be
+    reliably parseable from the PDF's own content. Looks for a
+    NNN-YYYY / NNN/YYYY style number first (matching real invoice numbers
+    like "634-2026"), normalized to "634/2026" to match the numero format
+    used elsewhere; falls back to any 2-5 digit run.
+    """
+    m = re.search(r"(\d{1,5})[-/](\d{4})", file_name)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    m = re.search(r"(\d{2,5})", file_name)
+    if m:
+        return m.group(1)
+    return None
+
+
 def is_facture_proforma(text: str) -> bool:
     return "FACTURE PROFORMA" in text.upper()
 
@@ -178,7 +213,7 @@ def parse_facture(text: str, file_name: str = "", tables=None) -> Facture | None
     # the same line, then the date value on the next line).
     m = re.search(r"(\d{1,2}/\d{1,2}/\d{2,4})\s*\nTél", text)
     if m:
-        f.date = m.group(1).strip()
+        f.date = _mdy_to_dmy(m.group(1).strip())
 
     m = re.search(r"Date\n(.+?)\n\d{1,2}/\d{1,2}/\d{2,4}\nTél", text)
     if m:

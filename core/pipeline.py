@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .excel_writer import write_workbook
 from .extractor import extract_folder
-from .facture_parser import parse_facture
+from .facture_parser import extract_invoice_number_from_filename, parse_facture
 
 # When bundled by PyInstaller (--onefile), __file__ resolves inside a
 # temporary extraction folder that's wiped after the process exits — logs
@@ -59,8 +59,15 @@ def process_folder(
     (case-insensitive; set to "" to disable), skipping byte-identical
     duplicate files, and merge the results into `invoice_summary.xlsx` in
     `output_dir` (defaults to `folder`) — existing rows from previous runs
-    are preserved; only genuinely new invoices are appended. Returns the
-    report's path.
+    are preserved; only genuinely new invoices are appended.
+
+    Any PDF whose filename contains "annulation" is treated as a
+    cancellation notice rather than a new invoice: its invoice number
+    (read from the PDF itself, or from the filename as a fallback) is
+    looked up and that invoice's row(s) are removed from the report
+    instead of being added.
+
+    Returns the report's path.
     """
     logger = setup_logging()
     folder = Path(folder)
@@ -76,10 +83,30 @@ def process_folder(
         logger.warning("No matching PDF files found in %s", folder)
 
     factures = []
+    cancelled_numeros: set[str] = set()
     seen_numeros: dict[str, str] = {}
     for res in results:
         if res.error:
             continue
+
+        if "annulation" in res.file_name.lower():
+            fac = parse_facture(res.full_text, res.file_name, tables=res.tables)
+            numero = fac.numero if fac and fac.numero else None
+            if not numero:
+                numero = extract_invoice_number_from_filename(res.file_name)
+            if numero:
+                cancelled_numeros.add(numero)
+                logger.info(
+                    "Cancellation file detected (%s) -> removing invoice N°%s from the report",
+                    res.file_name, numero,
+                )
+            else:
+                logger.warning(
+                    "Cancellation file %s: could not determine which invoice number to cancel.",
+                    res.file_name,
+                )
+            continue  # never add a cancellation file itself as an invoice
+
         fac = parse_facture(res.full_text, res.file_name, tables=res.tables)
         if fac is None:
             continue
@@ -98,7 +125,10 @@ def process_folder(
         factures.sort(key=lambda f: (int(f.numero) if f.numero.isdigit() else 0, f.numero))
 
     output_path = output_dir / "invoice_summary.xlsx"
-    write_workbook(results, output_path, source_folder=str(folder), factures=factures)
+    write_workbook(
+        results, output_path, source_folder=str(folder), factures=factures,
+        cancelled_numeros=cancelled_numeros,
+    )
 
     ok = sum(1 for r in results if not r.error)
     failed = len(results) - ok
