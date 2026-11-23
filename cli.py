@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from core.config import AppConfig, load_config, save_config
@@ -97,19 +98,41 @@ def main() -> int:
     folder = Path(folder_str).expanduser().resolve()
     output = Path(output_str).expanduser().resolve() if output_str else None
 
-    if not folder.exists() or not folder.is_dir():
+    if args.watch:
+        # At boot, OneDrive / the user profile may not be mounted yet: wait
+        # (up to 30 min) instead of exiting, so the service really comes up
+        # on its own after every restart.
+        waited = 0
+        while not (folder.exists() and folder.is_dir()):
+            if waited == 0:
+                logger.warning("Folder not available yet (OneDrive still starting?): %s - waiting...", folder)
+            if waited >= 1800:
+                logger.error("Folder still not available after 30 min: %s", folder)
+                return 1
+            time.sleep(10)
+            waited += 10
+        logger.info("Starting watch-folder service on: %s", folder)
+    elif not folder.exists() or not folder.is_dir():
         logger.error("Folder does not exist: %s", folder)
         print(f"ERROR: folder does not exist: {folder}", file=sys.stderr)
         return 1
 
     if args.watch:
-        logger.info("Starting watch-folder service on: %s", folder)
 
         def _on_change():
             process_folder(folder, output, recursive=recursive, name_filter=name_filter)
 
-        # Run once immediately on startup, then watch for changes.
-        _on_change()
+        # Run once immediately on startup (catches every PDF that reached
+        # OneDrive while the PC was off). A failure here (file still syncing,
+        # Excel open...) must never kill the service: retry every 30 s, and
+        # the periodic re-scan keeps trying afterwards anyway.
+        for attempt in range(1, 11):
+            try:
+                _on_change()
+                break
+            except Exception:
+                logger.exception("Startup scan failed (attempt %d/10), retrying in 30 s", attempt)
+                time.sleep(30)
         watcher = FolderWatcher(folder, _on_change)
         watcher.run_forever()
         return 0
