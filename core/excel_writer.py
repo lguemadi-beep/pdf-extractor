@@ -223,10 +223,12 @@ def _facture_to_rows(fac: Facture) -> list[tuple]:
     return [(fac.societe, fac.demandeur, fac.numero, fac.date, "", fac.sous_total_ht, "", "", "")]
 
 
-def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, invoice_count: int) -> Worksheet:
+def _fill_factures_sheet(
+    ws: Worksheet, rows: list[tuple], source_folder: str, invoice_count: int, title: str = "Factures Proforma"
+) -> Worksheet:
     header_row = _title_block(
         ws,
-        "Factures Proforma",
+        title,
         f"Dossier source : {source_folder}  |  Factures : {invoice_count}  |  Lignes : {len(rows)}",
         span_cols=9,
     )
@@ -285,13 +287,61 @@ def _fill_factures_sheet(ws: Worksheet, rows: list[tuple], source_folder: str, i
     return ws
 
 
+MONTHS_FR = [
+    "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
+    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
+]
+UNKNOWN_MONTH = "Date inconnue"
+_GENERIC_SHEETS = {"Summary", "Fields", "Tables"}
+
+
+def _month_key(date_str) -> tuple[int, int] | None:
+    """'15/10/2026' (dd/mm/yyyy) -> (2026, 10); None if not parseable."""
+    if hasattr(date_str, "year") and hasattr(date_str, "month"):
+        return date_str.year, date_str.month
+    parts = str(date_str or "").strip().split("/")
+    if len(parts) != 3:
+        return None
+    try:
+        dd, mm, yy = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    if yy < 100:
+        yy += 2000
+    if not 1 <= mm <= 12:
+        return None
+    return yy, mm
+
+
+def _group_rows_by_month(rows: list[tuple]) -> list[tuple[str, list[tuple]]]:
+    """
+    Split rows into one group per month (chronological), named after the
+    French month ("Octobre"). If the data spans several years the year is
+    added ("Octobre 2026") so two Octobers never collide. Rows with an
+    unreadable date go to a final "Date inconnue" sheet.
+    """
+    buckets: dict[tuple[int, int] | None, list[tuple]] = {}
+    for row in rows:
+        buckets.setdefault(_month_key(row[3]), []).append(row)
+    keys = sorted(k for k in buckets if k is not None)
+    multi_year = len({k[0] for k in keys}) > 1
+    groups = []
+    for k in keys:
+        name = f"{MONTHS_FR[k[1] - 1]} {k[0]}" if multi_year else MONTHS_FR[k[1] - 1]
+        groups.append((name, buckets[k]))
+    if None in buckets:
+        groups.append((UNKNOWN_MONTH, buckets[None]))
+    return groups
+
+
 def _load_existing_factures_sheet(output_path: Path) -> tuple[list[tuple], set[str]]:
     """
-    If invoice_summary.xlsx already exists, read back its "Factures" sheet
-    (data rows only — skipping the title block, header, and TOTAL row) so
-    that data already extracted in earlier runs — including any Owner /
-    Affectation / Status values typed in manually — is never lost.
-    Returns (existing_rows, existing_invoice_numbers).
+    If invoice_summary.xlsx already exists, read back every invoice sheet
+    (the monthly sheets, or the legacy single "Factures" sheet) — data rows
+    only, skipping title block, header and TOTAL row — so data extracted in
+    earlier runs, including manually typed Owner / Affectation / Status
+    values, is never lost. Rows are re-distributed into monthly sheets by
+    write_workbook. Returns (existing_rows, existing_invoice_numbers).
     """
     if not output_path.exists():
         return [], set()
@@ -300,39 +350,36 @@ def _load_existing_factures_sheet(output_path: Path) -> tuple[list[tuple], set[s
     except Exception:
         logger.warning("Could not read existing %s (will start fresh).", output_path.name)
         return [], set()
-    if "Factures" not in existing_wb.sheetnames:
-        return [], set()
-
-    ws = existing_wb["Factures"]
-    header_row = None
-    for r in range(1, ws.max_row + 1):
-        if ws.cell(row=r, column=1).value == "Fournisseur":
-            header_row = r
-            break
-    if header_row is None:
-        return [], set()
 
     rows: list[tuple] = []
     numeros: set[str] = set()
-    for r in range(header_row + 1, ws.max_row + 1):
-        first_cell = ws.cell(row=r, column=1).value
-        if first_cell is None or first_cell == "TOTAL":
+    seen_keys: set[tuple] = set()
+    for ws in existing_wb.worksheets:
+        if ws.title in _GENERIC_SHEETS:
             continue
-        # Read 9 columns even if this row was written by an older version of
-        # the app with fewer columns (Owner/Affectation/Status will read as
-        # None -> normalized to "" below).
-        row_vals = tuple(ws.cell(row=r, column=c).value for c in range(1, 10))
-        # normalize missing trailing cells to "" without touching numeric montant_ht (index 5)
-        row_vals = tuple(
-            ("" if (i >= 6 and v is None) else v) for i, v in enumerate(row_vals)
-        )
-        rows.append(row_vals)
-        numero = row_vals[2]
-        if numero:
-            numeros.add(str(numero))
+        header_row = None
+        for r in range(1, min(ws.max_row, 15) + 1):
+            if ws.cell(row=r, column=1).value == "Fournisseur":
+                header_row = r
+                break
+        if header_row is None:
+            continue
+        for r in range(header_row + 1, ws.max_row + 1):
+            first_cell = ws.cell(row=r, column=1).value
+            if first_cell is None or first_cell == "TOTAL":
+                continue
+            row_vals = tuple(ws.cell(row=r, column=c).value for c in range(1, 10))
+            row_vals = tuple(
+                ("" if (i >= 6 and v is None) else v) for i, v in enumerate(row_vals)
+            )
+            key = (str(row_vals[2]), str(row_vals[4]), row_vals[5])
+            if key in seen_keys:
+                continue  # guard against the same row living in two sheets
+            seen_keys.add(key)
+            rows.append(row_vals)
+            if row_vals[2]:
+                numeros.add(str(row_vals[2]))
     return rows, numeros
-
-
 
 
 def _safe_save(wb: Workbook, output_path: Path) -> None:
@@ -391,9 +438,16 @@ def write_workbook(
     wb.remove(wb.active)  # we'll add sheets explicitly in the right order
 
     # ------------------------------------------------------- Factures / Lignes
+    month_sheet_names: set[str] = set()
     if all_rows:
-        ws_fac = wb.create_sheet("Factures")
-        _fill_factures_sheet(ws_fac, all_rows, source_folder, invoice_count)
+        for sheet_name, month_rows in _group_rows_by_month(all_rows):
+            ws_m = wb.create_sheet(sheet_name)
+            month_sheet_names.add(sheet_name)
+            month_invoices = len({str(r[2]) for r in month_rows if r[2]})
+            _fill_factures_sheet(
+                ws_m, month_rows, source_folder, month_invoices,
+                title=f"Factures Proforma — {sheet_name}",
+            )
         wb.active = 0
 
     # If nothing was auto-recognized, fall back fully to the generic report
@@ -476,7 +530,7 @@ def write_workbook(
     _autosize(ws_tables, start_row=header_row)
 
     # ------------------------------------------------- One clean sheet / table
-    used_names = {"Factures", "Résumé Factures", "Summary", "Fields", "Tables"}
+    used_names = {"Factures", "Résumé Factures", "Summary", "Fields", "Tables"} | month_sheet_names
     for res in generic_results:
         for tbl in res.tables:
             base = f"{Path(res.file_name).stem}_p{tbl.page_number}_t{tbl.table_index}"
